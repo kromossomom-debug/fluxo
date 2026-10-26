@@ -1,4 +1,4 @@
-//! Integração com o yt-dlp (extração/baixar) e o ffmpeg (mesclar/converter).
+//! yt-dlp (extraction/downloading) and ffmpeg (merging/converting) integration.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -6,6 +6,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
+
+use crate::i18n::{fill, tr};
 
 #[cfg(windows)]
 const YTDLP_NAME: &str = "yt-dlp.exe";
@@ -29,7 +31,7 @@ const FFMPEG_URL: &str =
 const FFMPEG_URL: &str =
     "https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-linux64-gpl.tar.xz";
 
-/// Pasta onde o Fluxo guarda as ferramentas que ele mesmo baixa.
+/// Folder where Fluxo keeps the tools it downloads itself.
 pub fn tools_dir() -> PathBuf {
     crate::store::data_dir().join("bin")
 }
@@ -71,7 +73,7 @@ fn command(program: &Path) -> Command {
 }
 
 fn ytdlp_command() -> Result<Command, String> {
-    let path = ytdlp_path().ok_or("yt-dlp não encontrado. Instale-o em Configurações.")?;
+    let path = ytdlp_path().ok_or(tr().ytdlp_missing)?;
     let mut cmd = command(&path);
     cmd.args(["--encoding", "utf-8", "--no-warnings", "--no-config"]);
     if let Some(ff) = ffmpeg_path() {
@@ -86,17 +88,17 @@ pub fn ytdlp_version() -> Option<String> {
 }
 
 fn run_json(mut cmd: Command) -> Result<serde_json::Value, String> {
-    let out = cmd.output().map_err(|e| format!("Falha ao executar o yt-dlp: {e}"))?;
+    let out = cmd.output().map_err(|e| fill(tr().run_failed, e))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        let line = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("erro desconhecido");
+        let line = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or(tr().unknown_error);
         return Err(line.trim_start_matches("ERROR: ").to_string());
     }
-    serde_json::from_slice(&out.stdout).map_err(|e| format!("Resposta inválida do yt-dlp: {e}"))
+    serde_json::from_slice(&out.stdout).map_err(|e| fill(tr().invalid_response, e))
 }
 
 // ---------------------------------------------------------------------------
-// Metadados
+// Metadata
 
 #[derive(Clone, Debug, Default)]
 pub struct MediaInfo {
@@ -108,12 +110,12 @@ pub struct MediaInfo {
     pub duration: Option<f64>,
     pub views: Option<u64>,
     pub site: String,
-    /// Alturas de vídeo disponíveis (ex.: 2160, 1080, 720), da maior para a menor.
+    /// Available video heights (e.g. 2160, 1080, 720), largest first.
     pub heights: Vec<u32>,
-    /// Tamanho aproximado em bytes por altura, quando o site informa.
+    /// Approximate size in bytes per height, when the site reports it.
     pub sizes: Vec<(u32, u64)>,
     pub audio_size: Option<u64>,
-    /// true quando veio de uma busca (formatos ainda não carregados).
+    /// true when it came from a search (formats not loaded yet).
     pub partial: bool,
 }
 
@@ -206,7 +208,7 @@ impl RawInfo {
 
         MediaInfo {
             id,
-            title: self.title.unwrap_or_else(|| "Sem título".into()),
+            title: self.title.unwrap_or_else(|| tr().untitled.into()),
             url,
             uploader: self.uploader.or(self.channel).unwrap_or_default(),
             thumbnail,
@@ -221,7 +223,7 @@ impl RawInfo {
     }
 }
 
-/// Obtém os metadados completos (com formatos) de um link.
+/// Fetches full metadata (including formats) for a link.
 pub fn fetch_info(url: &str) -> Result<MediaInfo, String> {
     let mut cmd = ytdlp_command()?;
     cmd.args(["-J", "--no-playlist", "--", url]);
@@ -230,7 +232,7 @@ pub fn fetch_info(url: &str) -> Result<MediaInfo, String> {
     Ok(raw.into_media(false))
 }
 
-/// Busca vídeos no YouTube.
+/// Searches YouTube.
 pub fn search(query: &str, count: u32) -> Result<Vec<MediaInfo>, String> {
     #[derive(Deserialize)]
     struct Playlist {
@@ -260,7 +262,7 @@ pub fn search(query: &str, count: u32) -> Result<Vec<MediaInfo>, String> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Quality {
-    /// Melhor vídeo até a altura indicada.
+    /// Best video up to the given height.
     Video(u32),
     Mp3,
     M4a,
@@ -270,8 +272,8 @@ impl Quality {
     pub fn label(self) -> String {
         match self {
             Quality::Video(h) => format!("{} · MP4", height_label(h)),
-            Quality::Mp3 => "Áudio · MP3".into(),
-            Quality::M4a => "Áudio · M4A".into(),
+            Quality::Mp3 => format!("{} · MP3", tr().audio),
+            Quality::M4a => format!("{} · M4A", tr().audio),
         }
     }
     pub fn is_audio(self) -> bool {
@@ -314,7 +316,7 @@ fn clean(s: &str) -> String {
     }
 }
 
-/// Inicia o download e chama `on_event` (numa thread própria) a cada atualização.
+/// Runs the download and calls `on_event` (on its own thread) for every update.
 pub fn download(
     url: &str,
     quality: Quality,
@@ -359,13 +361,13 @@ pub fn download(
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return on_event(Event::Failed(format!("Falha ao iniciar o yt-dlp: {e}"))),
+        Err(e) => return on_event(Event::Failed(fill(tr().start_failed, e))),
     };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     *child_slot.lock().unwrap() = Some(child);
 
-    // stderr é lido à parte para não travar o processo, guardando a última linha de erro.
+    // stderr is read separately so the process never blocks; keeps the last error line.
     let last_error = Arc::new(Mutex::new(String::new()));
     let err_thread = stderr.map(|stderr| {
         let last_error = last_error.clone();
@@ -390,7 +392,7 @@ pub fn download(
                     .and_then(|p| p.trim().trim_end_matches('%').parse::<f32>().ok())
                     .unwrap_or(0.0)
                     / 100.0;
-                // Um novo arquivo começou (ex.: áudio depois do vídeo).
+                // A new file started (e.g. audio after video).
                 if pct + 0.2 < last_fraction {
                     part += 1;
                 }
@@ -406,14 +408,14 @@ pub fn download(
                     speed: fields.get(1).map(|s| clean(s)).unwrap_or_default(),
                     eta: fields.get(2).map(|s| clean(s)).unwrap_or_default(),
                     total,
-                    stage: if part == 0 { "Baixando".into() } else { format!("Baixando parte {}", part + 1) },
+                    stage: if part == 0 { tr().downloading.into() } else { fill(tr().downloading_part, part + 1) },
                 }));
             } else if let Some(path) = line.strip_prefix("FLXDONE|") {
                 final_path = Some(PathBuf::from(path.trim()));
             } else if line.starts_with("[Merger]") || line.starts_with("[ExtractAudio]") || line.starts_with("[VideoConvertor]") {
                 on_event(Event::Progress(Progress {
                     fraction: 1.0,
-                    stage: "Processando com ffmpeg…".into(),
+                    stage: tr().processing.into(),
                     ..Default::default()
                 }));
             }
@@ -430,12 +432,12 @@ pub fn download(
         (Some(Ok(s)), _) if s.success() => on_event(Event::Done(out_dir.to_path_buf())),
         _ => {
             let err = last_error.lock().unwrap().clone();
-            on_event(Event::Failed(if err.is_empty() { "Download interrompido".into() } else { err }));
+            on_event(Event::Failed(if err.is_empty() { tr().interrupted.into() } else { err }));
         }
     }
 }
 
-/// Encerra o processo do download (e seus filhos, no Windows).
+/// Kills the download process (and its children, on Windows).
 pub fn kill(child_slot: &ChildSlot) {
     if let Some(child) = child_slot.lock().unwrap().as_mut() {
         #[cfg(windows)]
@@ -449,10 +451,10 @@ pub fn kill(child_slot: &ChildSlot) {
 }
 
 // ---------------------------------------------------------------------------
-// Instalação das ferramentas
+// Tool installation
 
 fn http_get(url: &str, on_progress: &mut dyn FnMut(f32)) -> Result<Vec<u8>, String> {
-    let mut resp = ureq::get(url).call().map_err(|e| format!("Erro de rede: {e}"))?;
+    let mut resp = ureq::get(url).call().map_err(|e| fill(tr().network_error, e))?;
     let total: Option<u64> = resp
         .headers()
         .get("content-length")
@@ -462,7 +464,7 @@ fn http_get(url: &str, on_progress: &mut dyn FnMut(f32)) -> Result<Vec<u8>, Stri
     let mut data = Vec::with_capacity(total.unwrap_or(1 << 20) as usize);
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("Erro de rede: {e}"))?;
+        let n = reader.read(&mut buf).map_err(|e| fill(tr().network_error, e))?;
         if n == 0 {
             break;
         }
@@ -484,7 +486,7 @@ fn make_executable(_: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Baixa o yt-dlp oficial (GitHub) para a pasta de ferramentas do Fluxo.
+/// Downloads the official yt-dlp (GitHub) into Fluxo's tools folder.
 pub fn install_ytdlp(mut on_progress: impl FnMut(f32)) -> Result<(), String> {
     let data = http_get(YTDLP_URL, &mut on_progress)?;
     let dir = tools_dir();
@@ -494,15 +496,15 @@ pub fn install_ytdlp(mut on_progress: impl FnMut(f32)) -> Result<(), String> {
     make_executable(&path)
 }
 
-/// Atualiza o yt-dlp com o próprio mecanismo dele (`-U`).
+/// Updates yt-dlp with its own updater (`-U`).
 pub fn update_ytdlp() -> Result<String, String> {
-    let path = ytdlp_path().ok_or("yt-dlp não encontrado")?;
+    let path = ytdlp_path().ok_or(tr().ytdlp_missing)?;
     let out = command(&path).arg("-U").output().map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&out.stdout);
     Ok(text.lines().last().unwrap_or("").to_string())
 }
 
-/// Baixa uma build estática do ffmpeg (yt-dlp/FFmpeg-Builds) e extrai ffmpeg/ffprobe.
+/// Downloads a static ffmpeg build (yt-dlp/FFmpeg-Builds) and extracts ffmpeg/ffprobe.
 pub fn install_ffmpeg(mut on_progress: impl FnMut(f32)) -> Result<(), String> {
     let data = http_get(FFMPEG_URL, &mut on_progress)?;
     let dir = tools_dir();
@@ -529,7 +531,7 @@ pub fn install_ffmpeg(mut on_progress: impl FnMut(f32)) -> Result<(), String> {
     } else {
         let mut tar_bytes = Vec::new();
         lzma_rs::xz_decompress(&mut std::io::Cursor::new(data), &mut tar_bytes)
-            .map_err(|e| format!("Falha ao descompactar: {e}"))?;
+            .map_err(|e| fill(tr().unpack_failed, e))?;
         let mut archive = tar::Archive::new(std::io::Cursor::new(tar_bytes));
         for entry in archive.entries().map_err(|e| e.to_string())? {
             let mut entry = entry.map_err(|e| e.to_string())?;
@@ -544,14 +546,14 @@ pub fn install_ffmpeg(mut on_progress: impl FnMut(f32)) -> Result<(), String> {
         }
     }
     if found == 0 {
-        return Err("ffmpeg não encontrado no pacote baixado".into());
+        return Err(tr().ffmpeg_not_in_package.into());
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    //! Testes de rede (rodam o yt-dlp de verdade): `cargo test -- --ignored`.
+    //! Network tests (they run the real yt-dlp): `cargo test -- --ignored`.
     use super::*;
 
     const SHORT_VIDEO: &str = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
@@ -559,7 +561,7 @@ mod tests {
     #[test]
     #[ignore]
     fn search_returns_results() {
-        let list = search("rust programming language", 5).expect("busca");
+        let list = search("rust programming language", 5).expect("search");
         assert!(!list.is_empty());
         for m in &list {
             assert!(!m.id.is_empty() && !m.title.is_empty() && m.thumbnail.starts_with("https://"));
@@ -592,15 +594,15 @@ mod tests {
                     last = p.fraction;
                 }
                 Event::Done(path) => {
-                    println!("{quality:?}: {updates} atualizações, último {last:.2}, arquivo {}", path.display());
-                    assert!(path.is_file(), "arquivo final deve existir");
+                    println!("{quality:?}: {updates} updates, last {last:.2}, file {}", path.display());
+                    assert!(path.is_file(), "final file must exist");
                     assert!(updates > 0);
                     return path;
                 }
-                Event::Failed(e) => panic!("falhou: {e}"),
+                Event::Failed(e) => panic!("failed: {e}"),
             }
         }
-        panic!("sem evento final");
+        panic!("no final event");
     }
 
     #[test]

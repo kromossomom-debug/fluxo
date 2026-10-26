@@ -1,4 +1,4 @@
-//! Paleta, estilo do egui e pequenos desenhos reutilizáveis (gradientes, ícone).
+//! Palette, egui style and small reusable drawings (gradients, icon).
 
 use egui::{epaint::RectShape, Color32, CornerRadius, FontFamily, FontId, Rect, Stroke, TextStyle, TextureHandle};
 
@@ -97,7 +97,7 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
     });
 }
 
-/// Textura 256×1 com o gradiente da marca, usada para pintar retângulos arredondados.
+/// 256×1 texture with the brand gradient, used to paint rounded rectangles.
 pub fn gradient_texture(ctx: &egui::Context) -> TextureHandle {
     let w = 256;
     let pixels: Vec<Color32> = (0..w)
@@ -117,7 +117,7 @@ pub fn gradient_rect(painter: &egui::Painter, tex: &TextureHandle, rect: Rect, r
     painter.add(RectShape::filled(rect, radius, Color32::WHITE).with_texture(tex.id(), uv));
 }
 
-/// Ícone do app (círculo em gradiente com seta de download), gerado em código.
+/// App icon (gradient circle with a download arrow), generated in code.
 pub fn app_icon(size: u32) -> egui::IconData {
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     let s = size as f32;
@@ -132,7 +132,7 @@ pub fn app_icon(size: u32) -> egui::IconData {
             }
             let t = ((fx + fy) / (2.0 * s)).clamp(0.0, 1.0);
             let mut col = lerp_color(ACCENT_A, ACCENT_B, t);
-            // Seta: haste + ponta triangular
+            // Arrow: stem + triangular head
             let (nx, ny) = ((fx - c) / s, (fy - c) / s);
             let stem = nx.abs() < 0.07 && ny > -0.28 && ny < 0.08;
             let head = ny >= 0.0 && ny < 0.22 && nx.abs() < (0.22 - ny) * 1.1;
@@ -149,7 +149,7 @@ pub fn app_icon(size: u32) -> egui::IconData {
 
 #[cfg(test)]
 mod tests {
-    /// Gera `assets/icon.png` (usado no atalho do menu e no README): `cargo test -- --ignored export_icon`.
+    /// Writes `assets/icon.png` (used by the menu shortcut and README): `cargo test -- --ignored export_icon`.
     #[test]
     #[ignore]
     fn export_icon() {

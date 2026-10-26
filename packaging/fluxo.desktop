@@ -1,8 +1,10 @@
 [Desktop Entry]
 Type=Application
 Name=Fluxo
-GenericName=Downloader de vídeos
-Comment=Baixe vídeos e músicas do YouTube e de mais de 1000 sites
+GenericName=Video downloader
+GenericName[pt_BR]=Downloader de vídeos
+Comment=Download videos and music from YouTube and 1000+ sites
+Comment[pt_BR]=Baixe vídeos e músicas do YouTube e de mais de 1000 sites
 Exec=fluxo %U
 Icon=fluxo
 Terminal=false

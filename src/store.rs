@@ -1,10 +1,11 @@
-//! Configurações e histórico salvos em JSON na pasta de dados do usuário.
+//! Settings and history, stored as JSON in the user data folder.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::engine::Quality;
+use crate::i18n::Lang;
 
 pub fn data_dir() -> PathBuf {
     directories::ProjectDirs::from("io", "Fluxo", "Fluxo")
@@ -28,6 +29,8 @@ pub struct Settings {
     pub max_parallel: usize,
     pub default_quality: Quality,
     pub search_results: u32,
+    /// `None` follows the system language.
+    pub language: Option<Lang>,
 }
 
 impl Default for Settings {
@@ -38,6 +41,7 @@ impl Default for Settings {
             max_parallel: 3,
             default_quality: Quality::Video(1080),
             search_results: 16,
+            language: None,
         }
     }
 }

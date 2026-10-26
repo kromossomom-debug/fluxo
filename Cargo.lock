@@ -1216,7 +1216,7 @@ checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
 
 [[package]]
 name = "fluxo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "directories",
  "eframe",
@@ -1227,6 +1227,7 @@ dependencies = [
  "open",
  "serde",
  "serde_json",
+ "sys-locale",
  "tar",
  "ureq",
  "zip",

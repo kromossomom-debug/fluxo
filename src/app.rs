@@ -1,4 +1,4 @@
-//! Interface do Fluxo: barra lateral, início (busca/link), downloads, biblioteca e configurações.
+//! Fluxo's UI: sidebar, home (search/link), downloads, library and settings.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -10,8 +10,12 @@ use egui::{
 };
 
 use crate::engine::{self, ChildSlot, Event, MediaInfo, Progress, Quality};
+use crate::i18n::{self, fill, tr, Lang};
 use crate::store::{self, HistoryItem, Settings};
 use crate::theme::{self, Palette, ACCENT_A, ACCENT_B, DANGER, SUCCESS, WARNING};
+
+const COFFEE_URL: &str = "https://buymeacoffee.com/kromossomoc";
+const COFFEE_YELLOW: Color32 = Color32::from_rgb(0xFF, 0xDD, 0x00);
 
 const SITES: &[(&str, &str, Color32)] = &[
     ("YouTube", "https://www.youtube.com", Color32::from_rgb(0xFF, 0x2D, 0x2D)),
@@ -61,7 +65,7 @@ struct Task {
     child: ChildSlot,
 }
 
-/// Janela de detalhes de um vídeo, com a escolha de qualidade.
+/// Video details dialog with the quality picker.
 struct Picker {
     request: u64,
     media: MediaInfo,
@@ -99,8 +103,9 @@ pub struct FluxoApp {
     ctx: egui::Context,
     gradient: TextureHandle,
     applied_dark: Option<bool>,
-    /// Busca/link vindo da linha de comando, executado quando o motor estiver pronto.
+    /// Search/link from the command line, run once the engine is ready.
     pending_submit: bool,
+    applied_lang: Option<Lang>,
 }
 
 impl FluxoApp {
@@ -130,9 +135,10 @@ impl FluxoApp {
             gradient: theme::gradient_texture(ctx),
             applied_dark: None,
             pending_submit: false,
+            applied_lang: None,
         };
         let mut app = app;
-        // Argumentos: `fluxo [--page downloads|library|settings] [URL ou termo de busca]`
+        // Arguments: `fluxo [--page downloads|library|settings] [URL or search term]`
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             if arg == "--page" {
@@ -174,7 +180,7 @@ impl FluxoApp {
         self.toast = Some(Toast { text: text.into(), color, until: now + 3.5 });
     }
 
-    // ---------------------------------------------------------------- ações
+    // -------------------------------------------------------------- actions
 
     fn submit_query(&mut self) {
         let q = self.query.trim().to_string();
@@ -182,16 +188,16 @@ impl FluxoApp {
             return;
         }
         if self.ytdlp.is_none() {
-            self.toast("Instale o motor yt-dlp primeiro (Configurações)", WARNING);
+            self.toast(tr().install_engine_first, WARNING);
             return;
         }
         if q.starts_with("http://") || q.starts_with("https://") || q.starts_with("www.") {
             let url = if q.starts_with("www.") { format!("https://{q}") } else { q };
-            self.open_picker(MediaInfo { url, title: "Carregando…".into(), partial: true, ..Default::default() });
+            self.open_picker(MediaInfo { url, title: tr().loading.into(), partial: true, ..Default::default() });
         } else {
             self.searching = true;
             self.search_error = None;
-            self.results_title = format!("Resultados para “{q}”");
+            self.results_title = fill(tr().results_for, &q);
             let count = self.settings.search_results;
             let send = self.send_from_thread();
             std::thread::spawn(move || send(Msg::Search(engine::search(&q, count))));
@@ -224,7 +230,7 @@ impl FluxoApp {
     fn enqueue(&mut self, media: MediaInfo, quality: Quality) {
         let id = self.next_id;
         self.next_id += 1;
-        self.toast(format!("Adicionado aos downloads: {}", media.title), SUCCESS);
+        self.toast(fill(tr().added, &media.title), SUCCESS);
         self.tasks.insert(
             0,
             Task {
@@ -246,7 +252,7 @@ impl FluxoApp {
         let send = self.send_from_thread();
         for task in self.tasks.iter_mut().rev().filter(|t| t.state == TaskState::Queued).take(free) {
             task.state = TaskState::Running;
-            task.progress = Progress { stage: "Conectando…".into(), ..Default::default() };
+            task.progress = Progress { stage: tr().connecting.into(), ..Default::default() };
             let (id, url, quality, child, dir, send) =
                 (task.id, task.media.url.clone(), task.quality, task.child.clone(), dir.clone(), send.clone());
             std::thread::spawn(move || {
@@ -257,7 +263,7 @@ impl FluxoApp {
 
     fn install_tool(&mut self, ffmpeg: bool) {
         let name = if ffmpeg { "ffmpeg" } else { "yt-dlp" };
-        self.installing = Some((format!("Baixando {name}…"), 0.0));
+        self.installing = Some((fill(tr().fetching_tool, name), 0.0));
         let send = self.send_from_thread();
         std::thread::spawn(move || {
             let progress = {
@@ -265,12 +271,12 @@ impl FluxoApp {
                 move |f| send(Msg::ToolProgress(f))
             };
             let result = if ffmpeg { engine::install_ffmpeg(progress) } else { engine::install_ytdlp(progress) };
-            send(Msg::ToolDone(result.map(|_| format!("{name} instalado com sucesso"))));
+            send(Msg::ToolDone(result.map(|_| fill(tr().tool_installed, name))));
         });
     }
 
     fn update_ytdlp(&mut self) {
-        self.installing = Some(("Atualizando yt-dlp…".into(), -1.0));
+        self.installing = Some((tr().updating_ytdlp.into(), -1.0));
         let send = self.send_from_thread();
         std::thread::spawn(move || send(Msg::ToolDone(engine::update_ytdlp())));
     }
@@ -283,7 +289,7 @@ impl FluxoApp {
                     match res {
                         Ok(list) => {
                             if list.is_empty() {
-                                self.search_error = Some("Nenhum resultado encontrado.".into());
+                                self.search_error = Some(tr().no_results.into());
                             }
                             self.results = list;
                         }
@@ -328,7 +334,7 @@ impl FluxoApp {
                             let title = item.title.clone();
                             self.history.insert(0, item);
                             store::save_history(&self.history);
-                            self.toast(format!("Concluído: {title}"), SUCCESS);
+                            self.toast(fill(tr().finished, &title), SUCCESS);
                         }
                         Event::Failed(e) => task.state = TaskState::Failed(e),
                     }
@@ -346,7 +352,7 @@ impl FluxoApp {
                 Msg::ToolDone(res) => {
                     self.installing = None;
                     match res {
-                        Ok(m) => self.toast(if m.is_empty() { "Pronto".into() } else { m }, SUCCESS),
+                        Ok(m) => self.toast(if m.is_empty() { tr().ready.into() } else { m }, SUCCESS),
                         Err(e) => self.toast(e, DANGER),
                     }
                     self.check_tools();
@@ -366,11 +372,11 @@ impl FluxoApp {
             .inner_margin(Margin::same(16))
     }
 
-    /// Linha de `n` cards de mesma largura que respeita a largura disponível.
+    /// Row of `n` equal-width cards that fits the available width.
     fn card_row(&self, ui: &mut Ui, n: usize, min_height: f32, mut add: impl FnMut(usize, &mut Ui)) {
         let gap = 14.0;
         let outer = (ui.available_width() - gap * (n as f32 - 1.0)) / n as f32;
-        let inner = (outer - 34.0).max(40.0); // margens internas (2×16) + borda
+        let inner = (outer - 34.0).max(40.0); // inner margins (2×16) + border
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             for i in 0..n {
@@ -386,7 +392,7 @@ impl FluxoApp {
         });
     }
 
-    /// Botão principal com gradiente.
+    /// Primary gradient button.
     fn primary_button(&self, ui: &mut Ui, text: &str, size: egui::Vec2) -> egui::Response {
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
         if ui.is_rect_visible(rect) {
@@ -441,7 +447,7 @@ impl FluxoApp {
         }
     }
 
-    // --------------------------------------------------------------- páginas
+    // ---------------------------------------------------------------- pages
 
     fn sidebar(&mut self, ui: &mut Ui) {
         let p = self.pal();
@@ -454,17 +460,17 @@ impl FluxoApp {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.label(RichText::new("Fluxo").size(21.0).strong());
-                ui.label(RichText::new("Downloader de vídeos").size(11.5).color(p.muted));
+                ui.label(RichText::new(tr().tagline).size(11.5).color(p.muted));
             });
         });
         ui.add_space(26.0);
 
         let active = self.tasks.iter().filter(|t| matches!(t.state, TaskState::Running | TaskState::Queued)).count();
         let items = [
-            (Page::Home, "🏠", "Início", 0),
-            (Page::Downloads, "⬇", "Downloads", active),
-            (Page::Library, "📚", "Biblioteca", 0),
-            (Page::Settings, "⚙", "Configurações", 0),
+            (Page::Home, "🏠", tr().nav_home, 0),
+            (Page::Downloads, "⬇", tr().nav_downloads, active),
+            (Page::Library, "📚", tr().nav_library, 0),
+            (Page::Settings, "⚙", tr().nav_settings, 0),
         ];
         for (page, icon, label, badge) in items {
             let selected = self.page == page;
@@ -502,9 +508,9 @@ impl FluxoApp {
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.add_space(16.0);
             let (dot, text) = match (&self.ytdlp, self.tools_checked) {
-                (Some(v), _) => (SUCCESS, format!("Motor pronto · {v}")),
-                (None, false) => (p.muted, "Verificando motor…".to_string()),
-                (None, true) => (WARNING, "Motor não instalado".to_string()),
+                (Some(v), _) => (SUCCESS, fill(tr().engine_ready, v)),
+                (None, false) => (p.muted, tr().engine_checking.to_string()),
+                (None, true) => (WARNING, tr().engine_missing.to_string()),
             };
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
@@ -512,29 +518,31 @@ impl FluxoApp {
                 ui.painter().circle_filled(r.center(), 4.0, dot);
                 ui.label(RichText::new(text).size(12.0).color(p.muted));
             });
-            let label = if self.settings.dark { "☀  Tema claro" } else { "🌙  Tema escuro" };
+            let label = if self.settings.dark { tr().to_light } else { tr().to_dark };
             if ui.add(egui::Button::new(label).frame(false)).clicked() {
                 self.settings.dark = !self.settings.dark;
                 store::save_settings(&self.settings);
             }
+            ui.add_space(4.0);
+            coffee_button(ui, ui.available_width());
         });
     }
 
     fn home(&mut self, ui: &mut Ui) {
         let p = self.pal();
-        // Banner com busca
+        // Banner with search
         let hero_h = 210.0;
         let (hero, _) = ui.allocate_exact_size(vec2(ui.available_width(), hero_h), Sense::hover());
         theme::gradient_rect(ui.painter(), &self.gradient, hero, CornerRadius::same(20));
-        // Círculos decorativos
+        // Decorative circles
         let painter = ui.painter().with_clip_rect(hero);
         painter.circle_filled(hero.right_top() + vec2(-60.0, 20.0), 110.0, Color32::from_white_alpha(22));
         painter.circle_filled(hero.right_bottom() + vec2(-200.0, 40.0), 70.0, Color32::from_white_alpha(16));
 
         let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(hero.shrink2(vec2(32.0, 28.0))));
-        inner.label(RichText::new("Baixe vídeos e músicas").size(30.0).strong().color(Color32::WHITE));
+        inner.label(RichText::new(tr().hero_title).size(30.0).strong().color(Color32::WHITE));
         inner.label(
-            RichText::new("Cole um link do YouTube, Instagram, TikTok e de mais de 1000 sites — ou pesquise direto aqui.")
+            RichText::new(tr().hero_sub)
                 .size(15.0)
                 .color(Color32::from_white_alpha(225)),
         );
@@ -551,7 +559,7 @@ impl FluxoApp {
                         ui.label(RichText::new("🔍").size(17.0).color(p.muted));
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut self.query)
-                                .hint_text("Pesquisar ou colar link…")
+                                .hint_text(tr().search_hint)
                                 .frame(Frame::NONE)
                                 .font(FontId::proportional(17.0))
                                 .desired_width(ui.available_width() - btn_w - 40.0)
@@ -563,7 +571,7 @@ impl FluxoApp {
                     });
                 });
             let is_url = self.query.trim_start().starts_with("http") || self.query.trim_start().starts_with("www.");
-            let text = if is_url { "⬇  Baixar" } else { "Buscar" };
+            let text = if is_url { tr().download_btn } else { tr().search_btn };
             let (rect, resp) = ui.allocate_exact_size(vec2(btn_w, 44.0), Sense::click());
             ui.painter().rect_filled(rect, 12, if resp.hovered() { Color32::from_white_alpha(250) } else { Color32::WHITE });
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(16.0), ACCENT_A);
@@ -582,11 +590,11 @@ impl FluxoApp {
                     ui.label(RichText::new("⚠").size(22.0).color(WARNING));
                     ui.vertical(|ui| {
                         ui.set_width((ui.available_width() - 200.0).max(200.0));
-                        ui.label(RichText::new("Falta o motor de downloads").strong());
-                        ui.label(RichText::new("O Fluxo usa o yt-dlp (código aberto) para baixar. Instale com um clique.").color(p.muted));
+                        ui.label(RichText::new(tr().engine_missing_title).strong());
+                        ui.label(RichText::new(tr().engine_missing_text).color(p.muted));
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if self.installing.is_none() && self.primary_button(ui, "Instalar yt-dlp", vec2(150.0, 38.0)).clicked() {
+                        if self.installing.is_none() && self.primary_button(ui, tr().install_ytdlp, vec2(150.0, 38.0)).clicked() {
                             self.install_tool(false);
                         }
                         if let Some((t, f)) = &self.installing {
@@ -599,8 +607,8 @@ impl FluxoApp {
             ui.add_space(10.0);
         }
 
-        // Atalhos de sites
-        ui.label(RichText::new("Sites populares").size(17.0).strong());
+        // Site shortcuts
+        ui.label(RichText::new(tr().popular_sites).size(17.0).strong());
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
             for (name, url, color) in SITES {
@@ -620,16 +628,16 @@ impl FluxoApp {
                 if resp.clicked() {
                     let _ = open::that(url);
                 }
-                resp.on_hover_text("Abrir no navegador — copie o link de um vídeo e cole aqui");
+                resp.on_hover_text(tr().site_tip);
             }
         });
         ui.add_space(12.0);
 
-        // Resultados
+        // Results
         if self.searching {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(RichText::new("Buscando…").color(p.muted));
+                ui.label(RichText::new(tr().searching).color(p.muted));
             });
         } else if let Some(err) = &self.search_error {
             ui.label(RichText::new(format!("⚠ {err}")).color(DANGER));
@@ -664,7 +672,7 @@ impl FluxoApp {
                             ui.painter().rect_filled(r, 6, Color32::from_black_alpha(190));
                             ui.painter().galley(r.min + vec2(5.0, 2.0), galley, Color32::WHITE);
                         }
-                        // Botão de download rápido sobre a miniatura
+                        // Quick-download button over the thumbnail
                         let q_rect = egui::Rect::from_min_size(img.rect.right_top() + vec2(-44.0, 8.0), vec2(36.0, 36.0));
                         let q_resp = ui.interact(q_rect, ui.scope_id().with(("quick", &media.id)), Sense::click());
                         if img.hovered() || q_resp.hovered() {
@@ -698,7 +706,7 @@ impl FluxoApp {
             }
         });
         if let Some(m) = quick {
-            // Download rápido usa a qualidade padrão das configurações.
+            // Quick download uses the default quality from settings.
             let q = self.settings.default_quality;
             self.enqueue(m, q);
         } else if let Some(m) = open {
@@ -709,19 +717,16 @@ impl FluxoApp {
     fn empty_home(&mut self, ui: &mut Ui) {
         let p = self.pal();
         ui.add_space(6.0);
-        let steps = [
-            ("1", "Copie o link", "Em qualquer site de vídeo, copie o endereço do vídeo ou da música."),
-            ("2", "Cole no Fluxo", "Cole na barra acima. Ou digite um termo para pesquisar no YouTube."),
-            ("3", "Escolha e baixe", "Selecione a qualidade — de 360p a 4K, ou só o áudio em MP3."),
-        ];
+        let steps = tr().steps;
         let gradient = self.gradient.clone();
         self.card_row(ui, 3, 100.0, |i, ui| {
-            let (n, title, text) = steps[i];
+            let (title, text) = steps[i];
+            let n = (i + 1).to_string();
             let (r, _) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
             theme::gradient_rect(ui.painter(), &gradient, r, CornerRadius::same(15));
-            ui.painter().text(r.center(), Align2::CENTER_CENTER, n, FontId::proportional(15.0), Color32::WHITE);
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, &n, FontId::proportional(15.0), Color32::WHITE);
             ui.add(egui::Label::new(RichText::new(title).size(16.0).strong()).truncate());
-            // Texto com largura de quebra fixa: garante que o card não estoure a linha.
+            // Fixed wrap width so the card never overflows its row.
             let width = ui.max_rect().width();
             let galley = ui.painter().layout(text.to_string(), FontId::proportional(15.0), p.muted, width);
             let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
@@ -730,7 +735,7 @@ impl FluxoApp {
 
         if !self.history.is_empty() {
             ui.add_space(12.0);
-            ui.label(RichText::new("Baixados recentemente").size(17.0).strong());
+            ui.label(RichText::new(tr().recent).size(17.0).strong());
             let items: Vec<HistoryItem> = self.history.iter().take(6).cloned().collect();
             egui::ScrollArea::horizontal().id_salt("recent").show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -784,13 +789,13 @@ impl FluxoApp {
                 if picker.loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(RichText::new("Carregando formatos disponíveis…").color(p.muted));
+                        ui.label(RichText::new(tr().loading_formats).color(p.muted));
                     });
                 } else if let Some(err) = &picker.error {
                     ui.label(RichText::new(format!("⚠ {err}")).color(DANGER));
                 } else {
                     let heights: Vec<u32> = if m.heights.is_empty() { vec![1080, 720, 480, 360] } else { m.heights.clone() };
-                    ui.label(RichText::new("🎬  Vídeo").strong());
+                    ui.label(RichText::new(tr().video_section).strong());
                     ui.horizontal_wrapped(|ui| {
                         for h in heights {
                             let size = m.sizes.iter().find(|(sh, _)| *sh == h).map(|(_, s)| *s + m.audio_size.unwrap_or(0));
@@ -803,21 +808,21 @@ impl FluxoApp {
                         }
                     });
                     ui.add_space(4.0);
-                    ui.label(RichText::new("🎵  Somente áudio").strong());
+                    ui.label(RichText::new(tr().audio_section).strong());
                     ui.horizontal_wrapped(|ui| {
                         let audio = m.audio_size.map(fmt_bytes);
-                        let mp3_sub = if ffmpeg { "Alta qualidade".to_string() } else { "requer ffmpeg".into() };
+                        let mp3_sub = if ffmpeg { tr().high_quality.to_string() } else { tr().needs_ffmpeg.into() };
                         if option_tile(ui, &p, picker.quality == Quality::Mp3, "MP3", &mp3_sub, !ffmpeg).clicked() {
                             picker.quality = Quality::Mp3;
                         }
-                        let m4a_sub = audio.unwrap_or_else(|| "Original".into());
+                        let m4a_sub = audio.unwrap_or_else(|| tr().original.into());
                         if option_tile(ui, &p, picker.quality == Quality::M4a, "M4A", &m4a_sub, false).clicked() {
                             picker.quality = Quality::M4a;
                         }
                     });
                     if !ffmpeg {
                         ui.label(
-                            RichText::new("Sem ffmpeg: vídeos acima de 720p e MP3 ficam limitados. Instale-o em Configurações.")
+                            RichText::new(tr().no_ffmpeg_warning)
                                 .size(12.5)
                                 .color(WARNING),
                         );
@@ -837,11 +842,11 @@ impl FluxoApp {
                         } else {
                             ui.painter().rect_filled(rect, 10, p.border);
                         }
-                        ui.painter().text(rect.center(), Align2::CENTER_CENTER, "⬇  Baixar agora", FontId::proportional(15.5), Color32::WHITE);
+                        ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr().download_now, FontId::proportional(15.5), Color32::WHITE);
                         if enabled && resp.clicked() {
                             start = Some((picker.media.clone(), picker.quality));
                         }
-                        if ui.add(egui::Button::new("Cancelar").min_size(vec2(110.0, 42.0))).clicked() {
+                        if ui.add(egui::Button::new(tr().cancel).min_size(vec2(110.0, 42.0))).clicked() {
                             close = true;
                         }
                         if !picker.loading && picker.error.is_none() {
@@ -870,19 +875,19 @@ impl FluxoApp {
         let done = self.tasks.iter().filter(|t| matches!(t.state, TaskState::Done(_))).count();
 
         ui.horizontal(|ui| {
-            ui.heading("Downloads");
+            ui.heading(tr().nav_downloads);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let finished = self.tasks.iter().any(|t| !matches!(t.state, TaskState::Running | TaskState::Queued));
-                if ui.add_enabled(finished, egui::Button::new("🧹  Limpar finalizados")).clicked() {
+                if ui.add_enabled(finished, egui::Button::new(tr().clear_finished)).clicked() {
                     self.tasks.retain(|t| matches!(t.state, TaskState::Running | TaskState::Queued));
                 }
-                if ui.button("📁  Abrir pasta").clicked() {
+                if ui.button(tr().open_folder).clicked() {
                     let _ = std::fs::create_dir_all(&self.settings.download_dir);
                     let _ = open::that(&self.settings.download_dir);
                 }
             });
         });
-        let stats = [("Em andamento", running, ACCENT_A), ("Na fila", queued, WARNING), ("Concluídos", done, SUCCESS)];
+        let stats = [(tr().running, running, ACCENT_A), (tr().queued, queued, WARNING), (tr().completed, done, SUCCESS)];
         self.card_row(ui, 3, 0.0, |i, ui| {
             let (label, n, color) = stats[i];
             ui.label(RichText::new(n.to_string()).size(26.0).strong().color(color));
@@ -891,7 +896,7 @@ impl FluxoApp {
         ui.add_space(6.0);
 
         if self.tasks.is_empty() {
-            empty_state(ui, &p, "⬇", "Nenhum download por aqui", "Pesquise ou cole um link na tela Início para começar.");
+            empty_state(ui, &p, "⬇", tr().no_downloads, tr().no_downloads_text);
             return;
         }
 
@@ -918,15 +923,15 @@ impl FluxoApp {
                         match &task.state {
                             TaskState::Queued => {
                                 self.progress_bar(ui, 0.0, Some(p.border));
-                                ui.label(RichText::new("Na fila…").size(12.5).color(p.muted));
+                                ui.label(RichText::new(tr().queued_dots).size(12.5).color(p.muted));
                             }
                             TaskState::Running => {
                                 self.progress_bar(ui, task.progress.fraction, None);
                                 let pr = &task.progress;
                                 let mut parts = vec![format!("{} {:.0}%", pr.stage, pr.fraction * 100.0)];
-                                for (s, prefix) in [(&pr.speed, ""), (&pr.eta, "faltam "), (&pr.total, "")] {
+                                for (s, template) in [(&pr.speed, "{}"), (&pr.eta, tr().eta_left), (&pr.total, "{}")] {
                                     if !s.is_empty() {
-                                        parts.push(format!("{prefix}{s}"));
+                                        parts.push(fill(template, s));
                                     }
                                 }
                                 ui.label(RichText::new(parts.join("  ·  ")).size(12.5).color(p.muted));
@@ -934,7 +939,7 @@ impl FluxoApp {
                             TaskState::Done(path) => {
                                 self.progress_bar(ui, 1.0, Some(SUCCESS));
                                 let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                                ui.label(RichText::new(format!("✔ Concluído  ·  {name}")).size(12.5).color(SUCCESS));
+                                ui.label(RichText::new(fill(tr().done_file, name)).size(12.5).color(SUCCESS));
                             }
                             TaskState::Failed(e) => {
                                 self.progress_bar(ui, task.progress.fraction, Some(DANGER));
@@ -942,33 +947,33 @@ impl FluxoApp {
                             }
                             TaskState::Canceled => {
                                 self.progress_bar(ui, task.progress.fraction, Some(p.muted));
-                                ui.label(RichText::new("Cancelado").size(12.5).color(p.muted));
+                                ui.label(RichText::new(tr().canceled).size(12.5).color(p.muted));
                             }
                         }
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         match &task.state {
                             TaskState::Running | TaskState::Queued => {
-                                if icon_button(ui, &p, "✖", "Cancelar").clicked() {
+                                if icon_button(ui, &p, "✖", tr().cancel).clicked() {
                                     action = Some(Action::Cancel(task.id));
                                 }
                             }
                             TaskState::Done(path) => {
-                                if icon_button(ui, &p, "🗑", "Remover da lista").clicked() {
+                                if icon_button(ui, &p, "🗑", tr().remove_from_list).clicked() {
                                     action = Some(Action::Remove(task.id));
                                 }
-                                if icon_button(ui, &p, "📁", "Mostrar na pasta").clicked() {
+                                if icon_button(ui, &p, "📁", tr().show_in_folder).clicked() {
                                     let _ = open::that(path.parent().unwrap_or(path));
                                 }
-                                if icon_button(ui, &p, "▶", "Abrir").clicked() {
+                                if icon_button(ui, &p, "▶", tr().open).clicked() {
                                     let _ = open::that(path);
                                 }
                             }
                             TaskState::Failed(_) | TaskState::Canceled => {
-                                if icon_button(ui, &p, "🗑", "Remover da lista").clicked() {
+                                if icon_button(ui, &p, "🗑", tr().remove_from_list).clicked() {
                                     action = Some(Action::Remove(task.id));
                                 }
-                                if icon_button(ui, &p, "⟳", "Tentar novamente").clicked() {
+                                if icon_button(ui, &p, "⟳", tr().retry).clicked() {
                                     action = Some(Action::Retry(task.id));
                                 }
                             }
@@ -998,20 +1003,20 @@ impl FluxoApp {
     fn library(&mut self, ui: &mut Ui) {
         let p = self.pal();
         ui.horizontal(|ui| {
-            ui.heading("Biblioteca");
-            ui.label(RichText::new(format!("{} itens", self.history.len())).color(p.muted));
+            ui.heading(tr().nav_library);
+            ui.label(RichText::new(fill(tr().items, self.history.len())).color(p.muted));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 Frame::new().fill(p.surface).stroke(Stroke::new(1.0, p.border)).corner_radius(10).inner_margin(Margin::symmetric(10, 2)).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("🔍").color(p.muted));
-                        ui.add(egui::TextEdit::singleline(&mut self.library_filter).hint_text("Filtrar…").frame(Frame::NONE).desired_width(200.0));
+                        ui.add(egui::TextEdit::singleline(&mut self.library_filter).hint_text(tr().filter).frame(Frame::NONE).desired_width(200.0));
                     });
                 });
             });
         });
         ui.add_space(4.0);
         if self.history.is_empty() {
-            empty_state(ui, &p, "📚", "Sua biblioteca está vazia", "Os vídeos e músicas que você baixar aparecem aqui.");
+            empty_state(ui, &p, "📚", tr().library_empty, tr().library_empty_text);
             return;
         }
         let filter = self.library_filter.to_lowercase();
@@ -1027,7 +1032,7 @@ impl FluxoApp {
         grid(ui, visible.len(), 200.0, 16.0, |ui, n, cell_w| {
             let i = visible[n];
             let item = &history[i];
-            let card_w = cell_w - 22.0; // margens internas + borda
+            let card_w = cell_w - 22.0; // inner margins + border
             {
                 let exists = item.path.exists();
                 card.show(ui, |ui| ui.vertical(|ui| {
@@ -1050,17 +1055,17 @@ impl FluxoApp {
                     });
                     ui.horizontal(|ui| {
                         if !exists {
-                            ui.label(RichText::new("Arquivo não encontrado").size(12.0).color(WARNING));
+                            ui.label(RichText::new(tr().file_missing).size(12.0).color(WARNING));
                         } else {
-                            if icon_button(ui, &p, "▶", "Abrir").clicked() {
+                            if icon_button(ui, &p, "▶", tr().open).clicked() {
                                 let _ = open::that(&item.path);
                             }
-                            if icon_button(ui, &p, "📁", "Mostrar na pasta").clicked() {
+                            if icon_button(ui, &p, "📁", tr().show_in_folder).clicked() {
                                 let _ = open::that(item.path.parent().unwrap_or(&item.path));
                             }
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if icon_button(ui, &p, "🗑", "Remover da biblioteca (não apaga o arquivo)").clicked() {
+                            if icon_button(ui, &p, "🗑", tr().remove_from_library).clicked() {
                                 remove = Some(i);
                             }
                         });
@@ -1076,29 +1081,29 @@ impl FluxoApp {
 
     fn settings_page(&mut self, ui: &mut Ui) {
         let p = self.pal();
-        ui.heading("Configurações");
+        ui.heading(tr().nav_settings);
         ui.add_space(4.0);
         let mut changed = false;
 
         self.card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new("📁  Downloads").size(16.0).strong());
+            ui.label(RichText::new(tr().downloads_section).size(16.0).strong());
             ui.add_space(4.0);
-            ui.label(RichText::new("Pasta onde os arquivos são salvos").color(p.muted));
+            ui.label(RichText::new(tr().download_folder).color(p.muted));
             ui.horizontal(|ui| {
                 let mut text = self.settings.download_dir.to_string_lossy().to_string();
                 if ui.add(egui::TextEdit::singleline(&mut text).desired_width(ui.available_width() - 120.0)).changed() {
                     self.settings.download_dir = PathBuf::from(text);
                     changed = true;
                 }
-                if ui.button("Abrir").clicked() {
+                if ui.button(tr().open).clicked() {
                     let _ = std::fs::create_dir_all(&self.settings.download_dir);
                     let _ = open::that(&self.settings.download_dir);
                 }
             });
             ui.add_space(6.0);
             egui::Grid::new("settings-grid").num_columns(2).spacing(vec2(24.0, 14.0)).show(ui, |ui| {
-                ui.label("Qualidade padrão");
+                ui.label(tr().default_quality);
                 egui::ComboBox::from_id_salt("quality")
                     .width(180.0)
                     .selected_text(self.settings.default_quality.label())
@@ -1117,16 +1122,28 @@ impl FluxoApp {
                         }
                     });
                 ui.end_row();
-                ui.label("Downloads simultâneos");
+                ui.label(tr().parallel);
                 changed |= ui.add(egui::Slider::new(&mut self.settings.max_parallel, 1..=6)).changed();
                 ui.end_row();
-                ui.label("Resultados por busca");
+                ui.label(tr().per_search);
                 changed |= ui.add(egui::Slider::new(&mut self.settings.search_results, 6..=40)).changed();
                 ui.end_row();
-                ui.label("Tema");
+                ui.label(tr().theme);
                 ui.horizontal(|ui| {
-                    changed |= ui.selectable_value(&mut self.settings.dark, true, "🌙 Escuro").changed();
-                    changed |= ui.selectable_value(&mut self.settings.dark, false, "☀ Claro").changed();
+                    changed |= ui.selectable_value(&mut self.settings.dark, true, tr().dark).changed();
+                    changed |= ui.selectable_value(&mut self.settings.dark, false, tr().light).changed();
+                });
+                ui.end_row();
+                ui.label(tr().language);
+                let current = match self.settings.language {
+                    Some(l) => l.name().to_string(),
+                    None => format!("{} ({})", tr().lang_auto, i18n::system().name()),
+                };
+                egui::ComboBox::from_id_salt("language").width(180.0).selected_text(current).show_ui(ui, |ui| {
+                    changed |= ui.selectable_value(&mut self.settings.language, None, tr().lang_auto).changed();
+                    for l in [Lang::Pt, Lang::En] {
+                        changed |= ui.selectable_value(&mut self.settings.language, Some(l), l.name()).changed();
+                    }
                 });
                 ui.end_row();
             });
@@ -1134,7 +1151,7 @@ impl FluxoApp {
 
         self.card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new("⚙  Motor de downloads").size(16.0).strong());
+            ui.label(RichText::new(tr().engine_section).size(16.0).strong());
             ui.add_space(4.0);
             let busy = self.installing.is_some();
             let mut do_install: Option<bool> = None;
@@ -1142,25 +1159,25 @@ impl FluxoApp {
             egui::Grid::new("tools-grid").num_columns(3).spacing(vec2(24.0, 14.0)).show(ui, |ui| {
                 ui.label(RichText::new("yt-dlp").strong());
                 match &self.ytdlp {
-                    Some(v) => ui.label(RichText::new(format!("✔ versão {v}")).color(SUCCESS)),
-                    None => ui.label(RichText::new("✖ não instalado").color(DANGER)),
+                    Some(v) => ui.label(RichText::new(fill(tr().version, v)).color(SUCCESS)),
+                    None => ui.label(RichText::new(tr().not_installed).color(DANGER)),
                 };
                 ui.add_enabled_ui(!busy, |ui| {
                     if self.ytdlp.is_some() {
-                        do_update = ui.button("⟳  Atualizar").clicked();
+                        do_update = ui.button(tr().update).clicked();
                     } else {
-                        do_install = ui.button("⬇  Instalar").clicked().then_some(false);
+                        do_install = ui.button(tr().install).clicked().then_some(false);
                     }
                 });
                 ui.end_row();
                 ui.label(RichText::new("ffmpeg").strong());
                 if self.ffmpeg {
-                    ui.label(RichText::new("✔ encontrado").color(SUCCESS));
+                    ui.label(RichText::new(tr().found).color(SUCCESS));
                 } else {
-                    ui.label(RichText::new("✖ não instalado (necessário p/ 1080p+ e MP3)").color(WARNING));
+                    ui.label(RichText::new(tr().ffmpeg_needed).color(WARNING));
                 }
                 ui.add_enabled_ui(!busy, |ui| {
-                    if !self.ffmpeg && ui.button("⬇  Instalar").clicked() {
+                    if !self.ffmpeg && ui.button(tr().install).clicked() {
                         do_install = Some(true);
                     }
                 });
@@ -1178,7 +1195,7 @@ impl FluxoApp {
                 }
             }
             ui.label(
-                RichText::new(format!("As ferramentas baixadas ficam em {}", engine::tools_dir().display()))
+                RichText::new(fill(tr().tools_location, engine::tools_dir().display()))
                     .size(12.0)
                     .color(p.muted),
             );
@@ -1192,13 +1209,16 @@ impl FluxoApp {
 
         self.card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new("ℹ  Sobre").size(16.0).strong());
-            ui.label(RichText::new(format!("Fluxo {} — interface desktop em Rust para o yt-dlp.", env!("CARGO_PKG_VERSION"))).color(p.muted));
+            ui.label(RichText::new(tr().about).size(16.0).strong());
+            ui.label(RichText::new(fill(tr().about_text, env!("CARGO_PKG_VERSION"))).color(p.muted));
             ui.label(
-                RichText::new("Baixe apenas conteúdo que você tem direito de baixar e respeite os termos de uso de cada site.")
+                RichText::new(tr().legal)
                     .size(12.5)
                     .color(p.muted),
             );
+            ui.add_space(6.0);
+            ui.label(tr().coffee_text);
+            coffee_button(ui, 220.0);
         });
 
         if changed {
@@ -1246,6 +1266,12 @@ impl eframe::App for FluxoApp {
             theme::apply(&ctx, self.settings.dark);
             self.applied_dark = Some(self.settings.dark);
         }
+        let lang = self.settings.language.unwrap_or_else(i18n::system);
+        if self.applied_lang != Some(lang) {
+            i18n::set(lang);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(tr().window_title.into()));
+            self.applied_lang = Some(lang);
+        }
         self.handle_messages();
         if self.pending_submit && self.tools_checked {
             self.pending_submit = false;
@@ -1278,7 +1304,7 @@ impl eframe::App for FluxoApp {
 
 // ------------------------------------------------------------------ helpers
 
-/// Grade responsiva: tantas colunas de largura >= `min_w` quanto couberem.
+/// Responsive grid: as many columns of width >= `min_w` as fit.
 fn grid(ui: &mut Ui, count: usize, min_w: f32, gap: f32, mut cell: impl FnMut(&mut Ui, usize, f32)) {
     let avail = ui.available_width();
     let cols = (((avail + gap) / (min_w + gap)).floor() as usize).max(1);
@@ -1333,6 +1359,20 @@ fn option_tile(ui: &mut Ui, p: &Palette, selected: bool, title: &str, sub: &str,
     resp
 }
 
+/// Yellow Buy Me a Coffee button that opens the support page in the browser.
+fn coffee_button(ui: &mut Ui, width: f32) {
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 40.0), Sense::click());
+    let fill = if resp.hovered() { Color32::from_rgb(0xFF, 0xE6, 0x4D) } else { COFFEE_YELLOW };
+    ui.painter().rect_filled(rect, 10, fill);
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr().coffee, FontId::proportional(15.0), Color32::from_rgb(0x1A, 0x1A, 0x1A));
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if resp.on_hover_text(tr().coffee_tip).clicked() {
+        let _ = open::that(COFFEE_URL);
+    }
+}
+
 fn icon_button(ui: &mut Ui, p: &Palette, icon: &str, tip: &str) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::click());
     if resp.hovered() {
@@ -1369,26 +1409,28 @@ fn fmt_duration(secs: f64) -> String {
 
 fn fmt_views(v: u64) -> String {
     let n = v as f64;
+    let t = tr();
     let s = if n >= 1e9 {
-        format!("{:.1} bi", n / 1e9)
+        format!("{:.1} {}", n / 1e9, t.billion)
     } else if n >= 1e6 {
-        format!("{:.1} mi", n / 1e6)
+        format!("{:.1} {}", n / 1e6, t.million)
     } else if n >= 1e3 {
-        format!("{:.0} mil", n / 1e3)
+        format!("{:.0} {}", n / 1e3, t.thousand)
     } else {
         v.to_string()
     };
-    format!("{} visualizações", s.replace('.', ","))
+    let s = if t.decimal_comma { s.replace('.', ",") } else { s.replace(' ', "") };
+    format!("{s} {}", t.views)
 }
 
 fn fmt_bytes(b: u64) -> String {
     let b = b as f64;
-    if b >= 1e9 {
+    let s = if b >= 1e9 {
         format!("{:.1} GB", b / 1e9)
     } else if b >= 1e6 {
         format!("{:.0} MB", b / 1e6)
     } else {
         format!("{:.0} KB", b / 1e3)
-    }
-    .replace('.', ",")
+    };
+    if tr().decimal_comma { s.replace('.', ",") } else { s }
 }
